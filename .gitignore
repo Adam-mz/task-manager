@@ -1,0 +1,12 @@
+# Локальные переменные окружения
+.env
+.env.*
+!.env.example
+
+# Собранные программы и результаты тестов
+*.exe
+*.test
+/api
+/task-manager
+coverage.out
+coverage.html
