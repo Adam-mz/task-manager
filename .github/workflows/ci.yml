@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    env:
+      TEST_DATABASE_URL: postgres://task_manager:task_manager_password@localhost:5432/task_manager_test?sslmode=disable
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: task_manager_test
+          POSTGRES_USER: task_manager
+          POSTGRES_PASSWORD: task_manager_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U task_manager -d task_manager_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "Run go fmt ./... for these files:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Apply migrations
+        run: |
+          docker run --rm \
+            --network host \
+            -v "$GITHUB_WORKSPACE/migrations:/migrations:ro" \
+            migrate/migrate:v4.19.1 \
+            -path=/migrations \
+            -database "$TEST_DATABASE_URL" \
+            up
+
+      - name: Static analysis
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run tests
+        run: go test -race -count=1 -timeout=60s -v ./...
