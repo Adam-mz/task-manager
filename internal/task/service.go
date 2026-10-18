@@ -10,6 +10,7 @@ var (
 	ErrTitleRequired     = errors.New("task title is required")
 	ErrInvalidStatus     = errors.New("invalid task status")
 	ErrInvalidPagination = errors.New("limit must be between 1 and 100; offset must be non-negative")
+	ErrInvalidOrder      = errors.New("invalid order")
 )
 
 type Service struct {
@@ -45,6 +46,7 @@ func (s *Service) GetByID(ctx context.Context, id int64) (Task, error) {
 	}
 	return s.repository.GetByID(ctx, id)
 }
+
 func (s *Service) List(ctx context.Context, options ListOptions) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -54,6 +56,9 @@ func (s *Service) List(ctx context.Context, options ListOptions) ([]Task, error)
 	}
 	if options.Limit < 1 || options.Limit > 100 || options.Offset < 0 {
 		return nil, ErrInvalidPagination
+	}
+	if options.Order != "" && options.Order != "asc" && options.Order != "desc" {
+		return nil, ErrInvalidOrder
 	}
 	return s.repository.List(ctx, options)
 }

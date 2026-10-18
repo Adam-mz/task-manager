@@ -61,9 +61,16 @@ func (r *MemoryRepository) List(ctx context.Context, options ListOptions) ([]Tas
 		tasks = append(tasks, value)
 	}
 	r.mu.RUnlock()
-	sort.Slice(tasks, func(i, j int) bool {
-		return tasks[i].ID < tasks[j].ID
-	})
+
+	if options.Order == "desc" {
+		sort.Slice(tasks, func(i, j int) bool {
+			return tasks[i].ID > tasks[j].ID
+		})
+	} else {
+		sort.Slice(tasks, func(i, j int) bool {
+			return tasks[i].ID < tasks[j].ID
+		})
+	}
 
 	if options.Offset >= len(tasks) {
 		return []Task{}, nil

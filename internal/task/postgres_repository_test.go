@@ -211,6 +211,15 @@ func TestPostgresRepositoryListStatusFilter(t *testing.T) {
 		t.Fatalf("Find filtered page offset: %v", err)
 	}
 
+	var descOffset int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM tasks
+		WHERE status = $1 AND id > $2
+	`, string(StatusDone), secondDone.ID).Scan(&descOffset); err != nil {
+		t.Fatalf("Find descending page offset: %v", err)
+	}
+
 	tests := []struct {
 		name    string
 		options ListOptions
@@ -229,6 +238,20 @@ func TestPostgresRepositoryListStatusFilter(t *testing.T) {
 				Limit: 1, Offset: offset + 1, Status: StatusDone,
 			},
 			want: []Task{secondDone},
+		},
+		{
+			name: "done tasks in descending order",
+			options: ListOptions{
+				Status: StatusDone, Order: "desc", Limit: 2, Offset: descOffset,
+			},
+			want: []Task{secondDone, firstDone},
+		},
+		{
+			name: "descending order before pagination",
+			options: ListOptions{
+				Status: StatusDone, Order: "desc", Limit: 1, Offset: descOffset + 1,
+			},
+			want: []Task{firstDone},
 		},
 	}
 

@@ -23,6 +23,7 @@ type ListOptions struct {
 	Limit  int
 	Offset int
 	Status TaskStatus
+	Order  string
 }
 
 func (s TaskStatus) IsValid() bool {

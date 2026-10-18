@@ -80,6 +80,7 @@ func (h *HTTPHandler) List(w http.ResponseWriter, r *http.Request) {
 	options := ListOptions{
 		Limit:  20,
 		Offset: 0,
+		Order:  "",
 	}
 
 	query := r.URL.Query()
@@ -101,7 +102,9 @@ func (h *HTTPHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		options.Offset = offset
 	}
-
+	if query.Has("order") {
+		options.Order = query.Get("order")
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
@@ -118,6 +121,8 @@ func (h *HTTPHandler) List(w http.ResponseWriter, r *http.Request) {
 			_ = writeError(w, http.StatusBadRequest, ErrInvalidPagination.Error())
 		case errors.Is(err, ErrInvalidStatus):
 			_ = writeError(w, http.StatusBadRequest, ErrInvalidStatus.Error())
+		case errors.Is(err, ErrInvalidOrder):
+			_ = writeError(w, http.StatusBadRequest, ErrInvalidOrder.Error())
 		default:
 			_ = writeError(w, http.StatusInternalServerError, "internal server error")
 		}
