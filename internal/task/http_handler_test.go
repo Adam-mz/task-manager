@@ -929,6 +929,42 @@ func TestHTTPHandlerListStatusFilter(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantError:  "invalid task status",
 		},
+		{
+			name:       "ascending order",
+			url:        "/tasks?order=asc",
+			wantStatus: http.StatusOK,
+			wantIDs:    []int64{createdIDs[0], createdIDs[1], createdIDs[2], createdIDs[3]},
+		},
+		{
+			name:       "empty order",
+			url:        "/tasks?order=",
+			wantStatus: http.StatusOK,
+			wantIDs:    []int64{createdIDs[0], createdIDs[1], createdIDs[2], createdIDs[3]},
+		},
+		{
+			name:       "descending order",
+			url:        "/tasks?order=desc",
+			wantStatus: http.StatusOK,
+			wantIDs:    []int64{createdIDs[3], createdIDs[2], createdIDs[1], createdIDs[0]},
+		},
+		{
+			name:       "descending order with pagination",
+			url:        "/tasks?order=desc&limit=2&offset=1",
+			wantStatus: http.StatusOK,
+			wantIDs:    []int64{createdIDs[2], createdIDs[1]},
+		},
+		{
+			name:       "done with descending order and pagination",
+			url:        "/tasks?status=done&order=desc&limit=1&offset=1",
+			wantStatus: http.StatusOK,
+			wantIDs:    []int64{createdIDs[1]},
+		},
+		{
+			name:       "invalid order",
+			url:        "/tasks?order=unknown",
+			wantStatus: http.StatusBadRequest,
+			wantError:  ErrInvalidOrder.Error(),
+		},
 	}
 
 	for _, tt := range tests {

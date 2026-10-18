@@ -40,12 +40,16 @@ func (p *PostgresRepository) GetByID(ctx context.Context, id int64) (Task, error
 }
 
 func (p *PostgresRepository) List(ctx context.Context, options ListOptions) ([]Task, error) {
+	direction := "ASC"
+	if options.Order == "desc" {
+		direction = "DESC"
+	}
+
 	rows, err := p.pool.Query(ctx, `
 	SELECT id, title, description, status, created_at, updated_at
 	FROM tasks
 	WHERE ($3::text = '' OR status = $3)
-	ORDER BY id
-	LIMIT $1 OFFSET $2
+	ORDER BY id `+direction+` LIMIT $1 OFFSET $2
 	`, options.Limit, options.Offset, string(options.Status))
 
 	if err != nil {
