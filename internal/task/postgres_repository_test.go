@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -37,8 +38,32 @@ func openTestPostgres(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+func createPostgresTestUser(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var userID int64
+	err := pool.QueryRow(ctx, `
+		INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id
+	`, fmt.Sprintf("task-owner-%d@example.com", time.Now().UnixNano()), "test-hash").Scan(&userID)
+	if err != nil {
+		t.Fatalf("Create task owner: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(ctx, "DELETE FROM users WHERE id = $1", userID); err != nil {
+			t.Errorf("Cleanup task owner: %v", err)
+		}
+	})
+	return userID
+}
+
 func createPostgresTestTask(t *testing.T, repository *PostgresRepository, input Task) Task {
 	t.Helper()
+	if input.UserID == 0 {
+		input.UserID = createPostgresTestUser(t, repository.pool)
+	}
 	created, err := repository.Create(context.Background(), input)
 	if err != nil {
 		t.Fatalf("Create task: %v", err)
@@ -46,17 +71,20 @@ func createPostgresTestTask(t *testing.T, repository *PostgresRepository, input 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		err := repository.Delete(ctx, created.ID)
+		err := repository.Delete(ctx, created.UserID, created.ID)
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			t.Errorf("Cleanup task: %v", err)
 		}
 	})
+	if created.UserID != input.UserID {
+		t.Errorf("Created UserID = %d, want %d", created.UserID, input.UserID)
+	}
 	return created
 }
 
 func assertPostgresTaskEqual(t *testing.T, got, want Task) {
 	t.Helper()
-	if got.ID != want.ID || got.Title != want.Title || got.Description != want.Description || got.Status != want.Status {
+	if got.ID != want.ID || got.UserID != want.UserID || got.Title != want.Title || got.Description != want.Description || got.Status != want.Status {
 		t.Errorf("Task fields: got %+v, want %+v", got, want)
 	}
 	if !got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
@@ -77,11 +105,25 @@ func TestPostgresRepositoryCreateAndGet(t *testing.T) {
 	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 		t.Error("Created task dates must be nonzero")
 	}
-	got, err := repository.GetByID(context.Background(), created.ID)
+	var storedUserID int64
+	if err := repository.pool.QueryRow(t.Context(), "SELECT user_id FROM tasks WHERE id = $1", created.ID).Scan(&storedUserID); err != nil {
+		t.Fatalf("Read stored task owner: %v", err)
+	}
+	if storedUserID != created.UserID {
+		t.Errorf("Stored UserID = %d, want %d", storedUserID, created.UserID)
+	}
+	got, err := repository.GetByID(context.Background(), created.UserID, created.ID)
 	if err != nil {
 		t.Fatalf("Get task: %v", err)
 	}
 	assertPostgresTaskEqual(t, got, created)
+	if got.UserID != created.UserID {
+		t.Errorf("GetByID() UserID = %d, want %d", got.UserID, created.UserID)
+	}
+	otherUserID := createPostgresTestUser(t, repository.pool)
+	if foreign, err := repository.GetByID(t.Context(), otherUserID, created.ID); !errors.Is(err, ErrNotFound) || foreign != (Task{}) {
+		t.Errorf("GetByID() for another user = (%+v, %v), want zero Task and ErrNotFound", foreign, err)
+	}
 }
 
 func TestPostgresRepositoryUpdate(t *testing.T) {
@@ -92,7 +134,7 @@ func TestPostgresRepositoryUpdate(t *testing.T) {
 	if _, err := pool.Exec(ctx, "UPDATE tasks SET updated_at = created_at - INTERVAL '1 day' WHERE id = $1", created.ID); err != nil {
 		t.Fatalf("Set original update date: %v", err)
 	}
-	original, err := repository.GetByID(ctx, created.ID)
+	original, err := repository.GetByID(ctx, created.UserID, created.ID)
 	if err != nil {
 		t.Fatalf("Get original task: %v", err)
 	}
@@ -100,11 +142,22 @@ func TestPostgresRepositoryUpdate(t *testing.T) {
 	input.Title = "After update"
 	input.Description = "Updated description"
 	input.Status = StatusInProgress
+	input.UserID = createPostgresTestUser(t, pool)
+	if foreign, err := repository.Update(ctx, input); !errors.Is(err, ErrNotFound) || foreign != (Task{}) {
+		t.Fatalf("Update() for another user = (%+v, %v), want zero Task and ErrNotFound", foreign, err)
+	}
+	stored, err := repository.GetByID(ctx, original.UserID, original.ID)
+	if err != nil {
+		t.Fatalf("Get task after foreign update: %v", err)
+	}
+	assertPostgresTaskEqual(t, stored, original)
+
+	input.UserID = original.UserID
 	updated, err := repository.Update(ctx, input)
 	if err != nil {
 		t.Fatalf("Update task: %v", err)
 	}
-	if updated.ID != original.ID || updated.Title != input.Title || updated.Description != input.Description || updated.Status != input.Status {
+	if updated.ID != original.ID || updated.UserID != original.UserID || updated.Title != input.Title || updated.Description != input.Description || updated.Status != input.Status {
 		t.Errorf("Updated fields: got %+v, want %+v", updated, input)
 	}
 	if !updated.CreatedAt.Equal(original.CreatedAt) {
@@ -113,7 +166,7 @@ func TestPostgresRepositoryUpdate(t *testing.T) {
 	if !updated.UpdatedAt.After(original.UpdatedAt) {
 		t.Errorf("UpdatedAt %v must be later than %v", updated.UpdatedAt, original.UpdatedAt)
 	}
-	got, err := repository.GetByID(ctx, updated.ID)
+	got, err := repository.GetByID(ctx, created.UserID, updated.ID)
 	if err != nil {
 		t.Fatalf("Get updated task: %v", err)
 	}
@@ -124,13 +177,23 @@ func TestPostgresRepositoryDelete(t *testing.T) {
 	repository := NewPostgresRepository(openTestPostgres(t))
 	ctx := context.Background()
 	created := createPostgresTestTask(t, repository, Task{Title: "Delete me", Status: StatusTodo})
-	if err := repository.Delete(ctx, created.ID); err != nil {
+	otherUserID := createPostgresTestUser(t, repository.pool)
+	if err := repository.Delete(ctx, otherUserID, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete task for another user: got %v, want ErrNotFound", err)
+	}
+	stored, err := repository.GetByID(ctx, created.UserID, created.ID)
+	if err != nil {
+		t.Fatalf("Get task after foreign delete: %v", err)
+	}
+	assertPostgresTaskEqual(t, stored, created)
+
+	if err := repository.Delete(ctx, created.UserID, created.ID); err != nil {
 		t.Fatalf("Delete task: %v", err)
 	}
-	if _, err := repository.GetByID(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := repository.GetByID(ctx, created.UserID, created.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Get deleted task: got %v, want ErrNotFound", err)
 	}
-	if err := repository.Delete(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+	if err := repository.Delete(ctx, created.UserID, created.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Delete again: got %v, want ErrNotFound", err)
 	}
 }
@@ -139,16 +202,16 @@ func TestPostgresRepositoryNotFound(t *testing.T) {
 	repository := NewPostgresRepository(openTestPostgres(t))
 	ctx := context.Background()
 	created := createPostgresTestTask(t, repository, Task{Title: "Missing task", Status: StatusTodo})
-	if err := repository.Delete(ctx, created.ID); err != nil {
+	if err := repository.Delete(ctx, created.UserID, created.ID); err != nil {
 		t.Fatalf("Delete task: %v", err)
 	}
-	if _, err := repository.GetByID(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := repository.GetByID(ctx, created.UserID, created.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Get missing task: got %v, want ErrNotFound", err)
 	}
 	if _, err := repository.Update(ctx, created); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Update missing task: got %v, want ErrNotFound", err)
 	}
-	if err := repository.Delete(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+	if err := repository.Delete(ctx, created.UserID, created.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Delete missing task: got %v, want ErrNotFound", err)
 	}
 }
@@ -156,15 +219,15 @@ func TestPostgresRepositoryNotFound(t *testing.T) {
 func TestPostgresRepositoryList(t *testing.T) {
 	pool := openTestPostgres(t)
 	repository := NewPostgresRepository(pool)
-	first := createPostgresTestTask(t, repository, Task{Title: "First list task", Description: "First description", Status: StatusTodo})
-	second := createPostgresTestTask(t, repository, Task{Title: "Second list task", Description: "Second description", Status: StatusInProgress})
-	var offset int
-	if err := pool.QueryRow(t.Context(), "SELECT COUNT(*) FROM tasks WHERE id < $1", first.ID).Scan(&offset); err != nil {
-		t.Fatalf("Find test page offset: %v", err)
-	}
-	tasks, err := repository.List(t.Context(), ListOptions{Limit: 2, Offset: offset})
+	userID := createPostgresTestUser(t, pool)
+	first := createPostgresTestTask(t, repository, Task{UserID: userID, Title: "First list task", Description: "First description", Status: StatusTodo})
+	second := createPostgresTestTask(t, repository, Task{UserID: userID, Title: "Second list task", Description: "Second description", Status: StatusInProgress})
+	tasks, err := repository.List(t.Context(), userID, ListOptions{Limit: 2})
 	if err != nil {
 		t.Fatalf("List tasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("List length = %d, want 2", len(tasks))
 	}
 	found := make(map[int64]Task)
 	for i, task := range tasks {
@@ -180,45 +243,29 @@ func TestPostgresRepositoryList(t *testing.T) {
 			continue
 		}
 		assertPostgresTaskEqual(t, got, want)
+		if got.UserID != userID {
+			t.Errorf("List UserID = %d, want %d", got.UserID, userID)
+		}
 	}
 }
 
 func TestPostgresRepositoryListStatusFilter(t *testing.T) {
 	pool := openTestPostgres(t)
 	repository := NewPostgresRepository(pool)
-	ctx := t.Context()
+	userID := createPostgresTestUser(t, pool)
 
 	createPostgresTestTask(t, repository, Task{
-		Title: "A", Status: StatusTodo,
+		UserID: userID, Title: "A", Status: StatusTodo,
 	})
 	firstDone := createPostgresTestTask(t, repository, Task{
-		Title: "B", Status: StatusDone,
+		UserID: userID, Title: "B", Status: StatusDone,
 	})
 	createPostgresTestTask(t, repository, Task{
-		Title: "C", Status: StatusInProgress,
+		UserID: userID, Title: "C", Status: StatusInProgress,
 	})
 	secondDone := createPostgresTestTask(t, repository, Task{
-		Title: "D", Status: StatusDone,
+		UserID: userID, Title: "D", Status: StatusDone,
 	})
-
-	var offset int
-	err := pool.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM tasks
-		WHERE status = $1 AND id < $2
-	`, string(StatusDone), firstDone.ID).Scan(&offset)
-	if err != nil {
-		t.Fatalf("Find filtered page offset: %v", err)
-	}
-
-	var descOffset int
-	if err := pool.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM tasks
-		WHERE status = $1 AND id > $2
-	`, string(StatusDone), secondDone.ID).Scan(&descOffset); err != nil {
-		t.Fatalf("Find descending page offset: %v", err)
-	}
 
 	tests := []struct {
 		name    string
@@ -228,28 +275,28 @@ func TestPostgresRepositoryListStatusFilter(t *testing.T) {
 		{
 			name: "done tasks",
 			options: ListOptions{
-				Limit: 2, Offset: offset, Status: StatusDone,
+				Limit: 2, Status: StatusDone,
 			},
 			want: []Task{firstDone, secondDone},
 		},
 		{
 			name: "filter before pagination",
 			options: ListOptions{
-				Limit: 1, Offset: offset + 1, Status: StatusDone,
+				Limit: 1, Offset: 1, Status: StatusDone,
 			},
 			want: []Task{secondDone},
 		},
 		{
 			name: "done tasks in descending order",
 			options: ListOptions{
-				Status: StatusDone, Order: "desc", Limit: 2, Offset: descOffset,
+				Status: StatusDone, Order: "desc", Limit: 2,
 			},
 			want: []Task{secondDone, firstDone},
 		},
 		{
 			name: "descending order before pagination",
 			options: ListOptions{
-				Status: StatusDone, Order: "desc", Limit: 1, Offset: descOffset + 1,
+				Status: StatusDone, Order: "desc", Limit: 1, Offset: 1,
 			},
 			want: []Task{firstDone},
 		},
@@ -257,7 +304,7 @@ func TestPostgresRepositoryListStatusFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tasks, err := repository.List(t.Context(), tt.options)
+			tasks, err := repository.List(t.Context(), userID, tt.options)
 			if err != nil {
 				t.Fatalf("List tasks: %v", err)
 			}
@@ -271,8 +318,33 @@ func TestPostgresRepositoryListStatusFilter(t *testing.T) {
 	}
 }
 
+func TestPostgresRepositoryListOwnership(t *testing.T) {
+	pool := openTestPostgres(t)
+	repository := NewPostgresRepository(pool)
+	userA := createPostgresTestUser(t, pool)
+	userB := createPostgresTestUser(t, pool)
+
+	var legacyTaskID int64
+	err := pool.QueryRow(t.Context(), `
+		INSERT INTO tasks (title, status) VALUES ('Legacy task', 'done') RETURNING id
+	`).Scan(&legacyTaskID)
+	if err != nil {
+		t.Fatalf("Create legacy task without owner: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(ctx, "DELETE FROM tasks WHERE id = $1 AND user_id IS NULL", legacyTaskID); err != nil {
+			t.Errorf("Cleanup legacy task: %v", err)
+		}
+	})
+
+	testRepositoryListOwnership(t, repository, userA, userB)
+}
+
 func TestPostgresRepositoryConstraints(t *testing.T) {
 	repository := NewPostgresRepository(openTestPostgres(t))
+	userID := createPostgresTestUser(t, repository.pool)
 	cases := []struct {
 		name       string
 		input      Task
@@ -283,12 +355,13 @@ func TestPostgresRepositoryConstraints(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			tc.input.UserID = userID
 			created, err := repository.Create(context.Background(), tc.input)
 			if err == nil {
 				t.Cleanup(func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 					defer cancel()
-					if err := repository.Delete(ctx, created.ID); err != nil && !errors.Is(err, ErrNotFound) {
+					if err := repository.Delete(ctx, created.UserID, created.ID); err != nil && !errors.Is(err, ErrNotFound) {
 						t.Errorf("Cleanup task: %v", err)
 					}
 				})

@@ -33,6 +33,7 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://task_manager:task_manager_password@postgres:5432/task_manager?sslmode=disable
+      JWT_SECRET: "${JWT_SECRET:-}"
     ports:
       - "8080:8080"
     depends_on:

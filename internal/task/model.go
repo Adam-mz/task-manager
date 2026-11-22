@@ -17,6 +17,7 @@ type Task struct {
 	Status      TaskStatus
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	UserID      int64
 }
 
 type ListOptions struct {

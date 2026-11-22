@@ -11,6 +11,7 @@ var (
 	ErrInvalidStatus     = errors.New("invalid task status")
 	ErrInvalidPagination = errors.New("limit must be between 1 and 100; offset must be non-negative")
 	ErrInvalidOrder      = errors.New("invalid order")
+	ErrInvalidUserID     = errors.New("invalid user ID")
 )
 
 type Service struct {
@@ -23,7 +24,10 @@ func NewService(repository Repository) *Service {
 	}
 }
 
-func (s *Service) Create(ctx context.Context, title string, description string) (Task, error) {
+func (s *Service) Create(ctx context.Context, userID int64, title, description string) (Task, error) {
+	if userID <= 0 {
+		return Task{}, ErrInvalidUserID
+	}
 	if err := ctx.Err(); err != nil {
 		return Task{}, err
 	}
@@ -33,6 +37,7 @@ func (s *Service) Create(ctx context.Context, title string, description string) 
 	}
 	cleanDescription := strings.TrimSpace(description)
 	task := Task{
+		UserID:      userID,
 		Title:       cleanTitle,
 		Description: cleanDescription,
 		Status:      StatusTodo,
@@ -40,14 +45,20 @@ func (s *Service) Create(ctx context.Context, title string, description string) 
 	return s.repository.Create(ctx, task)
 }
 
-func (s *Service) GetByID(ctx context.Context, id int64) (Task, error) {
+func (s *Service) GetByID(ctx context.Context, userID, id int64) (Task, error) {
+	if userID <= 0 {
+		return Task{}, ErrInvalidUserID
+	}
 	if err := ctx.Err(); err != nil {
 		return Task{}, err
 	}
-	return s.repository.GetByID(ctx, id)
+	return s.repository.GetByID(ctx, userID, id)
 }
 
-func (s *Service) List(ctx context.Context, options ListOptions) ([]Task, error) {
+func (s *Service) List(ctx context.Context, userID int64, options ListOptions) ([]Task, error) {
+	if userID <= 0 {
+		return nil, ErrInvalidUserID
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -60,10 +71,13 @@ func (s *Service) List(ctx context.Context, options ListOptions) ([]Task, error)
 	if options.Order != "" && options.Order != "asc" && options.Order != "desc" {
 		return nil, ErrInvalidOrder
 	}
-	return s.repository.List(ctx, options)
+	return s.repository.List(ctx, userID, options)
 }
 
-func (s *Service) Update(ctx context.Context, id int64, title string, description string, status TaskStatus) (Task, error) {
+func (s *Service) Update(ctx context.Context, userID, id int64, title string, description string, status TaskStatus) (Task, error) {
+	if userID <= 0 {
+		return Task{}, ErrInvalidUserID
+	}
 	if err := ctx.Err(); err != nil {
 		return Task{}, err
 	}
@@ -77,6 +91,7 @@ func (s *Service) Update(ctx context.Context, id int64, title string, descriptio
 	}
 	task := Task{
 		ID:          id,
+		UserID:      userID,
 		Title:       cleanTitle,
 		Description: cleanDescription,
 		Status:      status,
@@ -84,9 +99,12 @@ func (s *Service) Update(ctx context.Context, id int64, title string, descriptio
 	return s.repository.Update(ctx, task)
 }
 
-func (s *Service) Delete(ctx context.Context, id int64) error {
+func (s *Service) Delete(ctx context.Context, userID, id int64) error {
+	if userID <= 0 {
+		return ErrInvalidUserID
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.repository.Delete(ctx, id)
+	return s.repository.Delete(ctx, userID, id)
 }

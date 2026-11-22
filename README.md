@@ -4,6 +4,7 @@ HTTP API для управления задачами на Go с хранени�
 
 ## Возможности
 
+- Регистрация, вход по JWT и доступ только к своим задачам.
 - Создание, получение, изменение и удаление задач.
 - Статусы: `todo`, `in_progress`, `done`.
 - Пагинация списка через `limit` и `offset`.
@@ -19,6 +20,30 @@ Go, net/http, pgx, PostgreSQL, golang-migrate, Docker Compose.
 
 Требуется запущенный Docker Desktop с поддержкой Linux-контейнеров.
 Команды выполняются из корня проекта.
+
+Перед запуском задайте `JWT_SECRET` в файле `.env` в корне проекта.
+Это случайный ключ размером не менее 32 байт **до кодирования**, записанный в Base64.
+Сгенерировать 32 случайных байта и получить Base64 можно в PowerShell:
+
+```powershell
+$jwtSecretBytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($jwtSecretBytes)
+$rng.Dispose()
+[Convert]::ToBase64String($jwtSecretBytes)
+```
+
+Добавьте в `.env` строку, подставив полученное значение:
+
+```dotenv
+JWT_SECRET=<сгенерированное_значение_Base64>
+```
+
+Docker Compose читает `.env` и передаёт `JWT_SECRET` в API.
+Без ключа, при некорректном Base64 или длине ключа менее 32 байт API не запустится.
+Файл `.env` исключён через `.gitignore`; не добавляйте его в коммит.
+
+Запустите API:
 
 ```powershell
 docker compose up -d --build api
@@ -64,14 +89,60 @@ docker compose stop
 
 ## Маршруты
 
-| Метод | Путь | Назначение |
-|---|---|---|
-| POST | `/tasks` | Создать задачу |
-| GET | `/tasks` | Получить список задач |
-| GET | `/tasks/{id}` | Получить задачу |
-| PUT | `/tasks/{id}` | Обновить задачу |
-| DELETE | `/tasks/{id}` | Удалить задачу |
-| GET | `/readyz` | Проверить доступность PostgreSQL |
+| Метод | Путь | Назначение | Авторизация |
+|---|---|---|---|
+| POST | `/auth/register` | Зарегистрироваться | Без токена |
+| POST | `/auth/login` | Войти и получить токен | Без токена |
+| GET | `/readyz` | Проверить доступность PostgreSQL | Без токена |
+| POST | `/tasks` | Создать задачу | Bearer-токен |
+| GET | `/tasks` | Получить список своих задач | Bearer-токен |
+| GET | `/tasks/{id}` | Получить свою задачу | Bearer-токен |
+| PUT | `/tasks/{id}` | Обновить свою задачу | Bearer-токен |
+| DELETE | `/tasks/{id}` | Удалить свою задачу | Bearer-токен |
+
+## Регистрация и вход
+
+`POST /auth/register`, `POST /auth/login` и `GET /readyz` доступны без токена.
+Все маршруты `/tasks` требуют заголовок `Authorization: Bearer <access_token>`.
+Сервер определяет владельца по токену; передавать `user_id` в запросах не нужно.
+Список содержит только задачи текущего пользователя.
+
+Выполняйте следующие команды и примеры запросов к задачам в одном окне PowerShell.
+Сначала зарегистрируйте пользователя; пароль должен содержать от 15 до 128 символов:
+
+```powershell
+$credentials = @{
+    email = "adam@example.com"
+    password = "LocalDemoPassword123!"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://localhost:8080/auth/register" `
+    -ContentType "application/json" `
+    -Body $credentials
+```
+
+Успешная регистрация возвращает `201 Created`. Если пользователь уже зарегистрирован,
+перейдите сразу ко входу с его email и паролем.
+
+Сохраните ответ входа в `$login`, затем сформируйте заголовок для запросов к задачам:
+
+```powershell
+$login = Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://localhost:8080/auth/login" `
+    -ContentType "application/json" `
+    -Body $credentials
+
+$headers = @{ Authorization = "Bearer $($login.access_token)" }
+Invoke-RestMethod -Uri "http://localhost:8080/tasks" -Headers $headers
+```
+
+Вход возвращает `200 OK`, `access_token` сроком на 15 минут и `token_type: "Bearer"`.
+После истечения срока снова выполните вход и обновите `$headers`.
+Без действительного токена запросы к `/tasks` возвращают `401 Unauthorized`.
+Для чужой или отсутствующей задачи чтение, обновление и удаление возвращают `404 Not Found`.
 
 ## Параметры списка
 
@@ -95,13 +166,14 @@ docker compose stop
 Пустой результат возвращается как JSON-массив `[]`.
 
 ```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/tasks?status=done&order=desc&limit=10&offset=0"
+Invoke-RestMethod -Uri "http://localhost:8080/tasks?status=done&order=desc&limit=10&offset=0" -Headers $headers
 ```
 
 ## Примеры запросов
 
 Выполняйте команды в одном окне PowerShell:
-переменная `$createdTask` хранит созданную задачу.
+`$headers` содержит Bearer-токен из примера входа выше,
+а `$createdTask` хранит созданную задачу.
 
 ### Создание
 
@@ -109,6 +181,7 @@ Invoke-RestMethod -Uri "http://localhost:8080/tasks?status=done&order=desc&limit
 $createdTask = Invoke-RestMethod `
     -Method Post `
     -Uri "http://localhost:8080/tasks" `
+    -Headers $headers `
     -ContentType "application/json" `
     -Body '{"title":"Learn Docker","description":"Run API in a container"}'
 
@@ -120,7 +193,7 @@ $createdTask
 ### Получение по ID
 
 ```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/tasks/$($createdTask.id)"
+Invoke-RestMethod -Uri "http://localhost:8080/tasks/$($createdTask.id)" -Headers $headers
 ```
 
 ### Обновление
@@ -129,6 +202,7 @@ Invoke-RestMethod -Uri "http://localhost:8080/tasks/$($createdTask.id)"
 Invoke-RestMethod `
     -Method Put `
     -Uri "http://localhost:8080/tasks/$($createdTask.id)" `
+    -Headers $headers `
     -ContentType "application/json" `
     -Body '{"title":"Learn Docker","description":"Run API in a container","status":"done"}'
 ```
@@ -136,7 +210,7 @@ Invoke-RestMethod `
 ### Список выполненных задач
 
 ```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/tasks?status=done&limit=10&offset=0"
+Invoke-RestMethod -Uri "http://localhost:8080/tasks?status=done&limit=10&offset=0" -Headers $headers
 ```
 
 ### Удаление
@@ -144,21 +218,24 @@ Invoke-RestMethod -Uri "http://localhost:8080/tasks?status=done&limit=10&offset=
 ```powershell
 Invoke-RestMethod `
     -Method Delete `
-    -Uri "http://localhost:8080/tasks/$($createdTask.id)"
+    -Uri "http://localhost:8080/tasks/$($createdTask.id)" `
+    -Headers $headers
 ```
 
 Успешный ответ: `204 No Content`, без тела ответа.
 
 ## Ошибки
 
-Ошибки, обработанные обработчиками задач, возвращаются в JSON.
+Ошибки авторизации и запросов к задачам возвращаются в JSON.
 
 ```json
 {"error":"invalid task id"}
 ```
 
 - `400` — некорректные входные данные.
-- `404` — задача не найдена.
+- `401` — токен отсутствует, недействителен или истёк; при входе — неверные email или пароль.
+- `404` — задача не найдена или принадлежит другому пользователю.
+- `409` — email уже зарегистрирован.
 - `500` — внутренняя ошибка сервера.
 - `503` — истёк таймаут операции.
 

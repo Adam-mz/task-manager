@@ -34,19 +34,19 @@ func (r *MemoryRepository) Create(ctx context.Context, task Task) (Task, error) 
 	return task, nil
 }
 
-func (r *MemoryRepository) GetByID(ctx context.Context, id int64) (Task, error) {
+func (r *MemoryRepository) GetByID(ctx context.Context, userID, id int64) (Task, error) {
 	if err := ctx.Err(); err != nil {
 		return Task{}, err
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	task, ok := r.tasks[id]
-	if !ok {
+	if !ok || task.UserID != userID {
 		return Task{}, ErrNotFound
 	}
 	return task, nil
 }
-func (r *MemoryRepository) List(ctx context.Context, options ListOptions) ([]Task, error) {
+func (r *MemoryRepository) List(ctx context.Context, userID int64, options ListOptions) ([]Task, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -55,6 +55,9 @@ func (r *MemoryRepository) List(ctx context.Context, options ListOptions) ([]Tas
 	tasks := make([]Task, 0, len(r.tasks))
 
 	for _, value := range r.tasks {
+		if value.UserID != userID {
+			continue
+		}
 		if options.Status != "" && value.Status != options.Status {
 			continue
 		}
@@ -90,7 +93,7 @@ func (r *MemoryRepository) Update(ctx context.Context, task Task) (Task, error) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	taskUpdate, ok := r.tasks[task.ID]
-	if !ok {
+	if !ok || taskUpdate.UserID != task.UserID {
 		return Task{}, ErrNotFound
 	}
 
@@ -104,14 +107,15 @@ func (r *MemoryRepository) Update(ctx context.Context, task Task) (Task, error) 
 	return taskUpdate, nil
 }
 
-func (r *MemoryRepository) Delete(ctx context.Context, id int64) error {
+func (r *MemoryRepository) Delete(ctx context.Context, userID, id int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, ok := r.tasks[id]; !ok {
+	task, ok := r.tasks[id]
+	if !ok || task.UserID != userID {
 		return ErrNotFound
 	}
 	delete(r.tasks, id)

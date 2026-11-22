@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN user_id BIGINT REFERENCES users(id);
