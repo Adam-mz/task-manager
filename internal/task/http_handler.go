@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"task-manager/internal/auth"
 )
 
 type HTTPHandler struct {
@@ -43,6 +45,13 @@ func newTaskResponse(task Task) taskResponse {
 }
 
 func (h *HTTPHandler) Create(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		_ = writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	var request createTaskRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -54,7 +63,7 @@ func (h *HTTPHandler) Create(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	created, err := h.service.Create(ctx, request.Title, request.Description)
+	created, err := h.service.Create(ctx, userID, request.Title, request.Description)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
@@ -77,6 +86,13 @@ func (h *HTTPHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) List(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		_ = writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	options := ListOptions{
 		Limit:  20,
 		Offset: 0,
@@ -108,7 +124,7 @@ func (h *HTTPHandler) List(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	tasks, err := h.service.List(ctx, options)
+	tasks, err := h.service.List(ctx, userID, options)
 	if err != nil {
 		switch {
 		case errors.Is(err, context.Canceled):
@@ -133,6 +149,13 @@ func (h *HTTPHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		_ = writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	idText := r.PathValue("id")
 
 	id, err := strconv.ParseInt(idText, 10, 64)
@@ -144,7 +167,7 @@ func (h *HTTPHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	task, err := h.service.GetByID(ctx, id)
+	task, err := h.service.GetByID(ctx, userID, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
@@ -167,6 +190,13 @@ func (h *HTTPHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) Update(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		_ = writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	idText := r.PathValue("id")
 
 	id, err := strconv.ParseInt(idText, 10, 64)
@@ -187,7 +217,7 @@ func (h *HTTPHandler) Update(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	task, err := h.service.Update(ctx, id, request.Title, request.Description, request.Status)
+	task, err := h.service.Update(ctx, userID, id, request.Title, request.Description, request.Status)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
@@ -220,6 +250,12 @@ func (h *HTTPHandler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		_ = writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 
 	idText := r.PathValue("id")
 	id, err := strconv.ParseInt(idText, 10, 64)
@@ -232,7 +268,7 @@ func (h *HTTPHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	err = h.service.Delete(ctx, id)
+	err = h.service.Delete(ctx, userID, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return

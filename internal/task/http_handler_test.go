@@ -6,17 +6,34 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"task-manager/internal/auth"
 )
+
+func serveAuthenticatedTaskRequest(t *testing.T, handler http.Handler, w http.ResponseWriter, r *http.Request, userID int64) {
+	t.Helper()
+	tokens, err := auth.NewTokenManager([]byte("0123456789abcdef0123456789abcdef"), time.Hour)
+	if err != nil {
+		t.Fatalf("Create token manager: %v", err)
+	}
+	token, err := tokens.Generate(userID)
+	if err != nil {
+		t.Fatalf("Generate token: %v", err)
+	}
+	r.Header.Set("Authorization", "Bearer "+token)
+	tokens.Middleware(handler).ServeHTTP(w, r)
+}
 
 type timeoutRepository struct {
 	Repository
 }
 
-func (r *timeoutRepository) GetByID(ctx context.Context, id int64) (Task, error) {
+func (r *timeoutRepository) GetByID(ctx context.Context, userID, id int64) (Task, error) {
 	<-ctx.Done()
 	return Task{}, ctx.Err()
 }
@@ -26,7 +43,7 @@ func (r *timeoutRepository) Create(ctx context.Context, task Task) (Task, error)
 	return Task{}, ctx.Err()
 }
 
-func (r *timeoutRepository) List(ctx context.Context, options ListOptions) ([]Task, error) {
+func (r *timeoutRepository) List(ctx context.Context, userID int64, options ListOptions) ([]Task, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -36,7 +53,7 @@ func (r *timeoutRepository) Update(ctx context.Context, task Task) (Task, error)
 	return Task{}, ctx.Err()
 }
 
-func (r *timeoutRepository) Delete(ctx context.Context, id int64) error {
+func (r *timeoutRepository) Delete(ctx context.Context, userID, id int64) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -50,7 +67,7 @@ func (r *errorRepository) Create(ctx context.Context, task Task) (Task, error) {
 	return Task{}, r.err
 }
 
-func (r *errorRepository) List(ctx context.Context, options ListOptions) ([]Task, error) {
+func (r *errorRepository) List(ctx context.Context, userID int64, options ListOptions) ([]Task, error) {
 	return nil, r.err
 }
 
@@ -58,7 +75,7 @@ func (r *errorRepository) Update(ctx context.Context, task Task) (Task, error) {
 	return Task{}, r.err
 }
 
-func (r *errorRepository) Delete(ctx context.Context, id int64) error {
+func (r *errorRepository) Delete(ctx context.Context, userID, id int64) error {
 	return r.err
 }
 
@@ -74,7 +91,7 @@ func TestHTTPHandlerCreateSuccess(t *testing.T) {
 	)
 	recorder := httptest.NewRecorder()
 
-	handler.Create(recorder, request)
+	serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.Create), recorder, request, 42)
 
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("Create() status code = %d, want %d", recorder.Code, http.StatusCreated)
@@ -101,6 +118,58 @@ func TestHTTPHandlerCreateSuccess(t *testing.T) {
 	}
 	if response.CreatedAt.IsZero() {
 		t.Error("Create() CreatedAt is zero")
+	}
+	stored, err := repository.GetByID(request.Context(), 42, response.ID)
+	if err != nil {
+		t.Fatalf("Get created task: %v", err)
+	}
+	if stored.UserID != 42 {
+		t.Errorf("Created task UserID = %d, want authenticated user 42", stored.UserID)
+	}
+}
+
+func TestHTTPHandlerCreateUnauthorized(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "valid JSON", body: `{"title":"Task","description":"Test"}`},
+		{name: "broken JSON", body: `{"title":`},
+		{name: "empty body", body: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repository := NewMemoryRepository()
+			handler := NewHTTPHandler(NewService(repository))
+			request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(tt.body))
+			recorder := httptest.NewRecorder()
+
+			handler.Create(recorder, request)
+
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("Create() status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+			}
+			if got := recorder.Header().Get("WWW-Authenticate"); got != "Bearer" {
+				t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
+			var response errorResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("Decode response: %v", err)
+			}
+			if response.Error != "unauthorized" {
+				t.Errorf("Error = %q, want unauthorized", response.Error)
+			}
+			tasks, err := repository.List(t.Context(), 42, ListOptions{Limit: 100})
+			if err != nil {
+				t.Fatalf("List tasks: %v", err)
+			}
+			if len(tasks) != 0 {
+				t.Errorf("Unauthorized request created %d tasks, want 0", len(tasks))
+			}
+		})
 	}
 }
 
@@ -140,7 +209,7 @@ func TestHTTPHandlerCreateErrors(t *testing.T) {
 			)
 			recorder := httptest.NewRecorder()
 
-			handler.Create(recorder, request)
+			serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.Create), recorder, request, 42)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("Create() status code = %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -169,7 +238,7 @@ func TestHTTPHandlerList(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 		recorder := httptest.NewRecorder()
 
-		handler.List(recorder, request)
+		serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.List), recorder, request, 42)
 
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("List() status code = %d, want %d", recorder.Code, http.StatusOK)
@@ -196,17 +265,17 @@ func TestHTTPHandlerList(t *testing.T) {
 		handler := NewHTTPHandler(service)
 		request := httptest.NewRequest(http.MethodGet, "/tasks", nil)
 
-		first, err := service.Create(request.Context(), "First task", "First description")
+		first, err := service.Create(request.Context(), 42, "First task", "First description")
 		if err != nil {
 			t.Fatalf("Create first task: %v", err)
 		}
-		second, err := service.Create(request.Context(), "Second task", "Second description")
+		second, err := service.Create(request.Context(), 42, "Second task", "Second description")
 		if err != nil {
 			t.Fatalf("Create second task: %v", err)
 		}
 
 		recorder := httptest.NewRecorder()
-		handler.List(recorder, request)
+		serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.List), recorder, request, 42)
 
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("List() status code = %d, want %d", recorder.Code, http.StatusOK)
@@ -238,14 +307,14 @@ func TestHTTPHandlerGetByID(t *testing.T) {
 		handler := NewHTTPHandler(service)
 		request := httptest.NewRequest(http.MethodGet, "/tasks/1", nil)
 
-		created, err := service.Create(request.Context(), "Learn Go", "Study HTTP handlers")
+		created, err := service.Create(request.Context(), 42, "Learn Go", "Study HTTP handlers")
 		if err != nil {
 			t.Fatalf("Create task: %v", err)
 		}
 		request.SetPathValue("id", "1")
 		recorder := httptest.NewRecorder()
 
-		handler.GetByID(recorder, request)
+		serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.GetByID), recorder, request, 42)
 
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("GetByID() status code = %d, want %d", recorder.Code, http.StatusOK)
@@ -274,7 +343,7 @@ func TestHTTPHandlerGetByID(t *testing.T) {
 		request.SetPathValue("id", "abc")
 		recorder := httptest.NewRecorder()
 
-		handler.GetByID(recorder, request)
+		serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.GetByID), recorder, request, 42)
 
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("GetByID() status code = %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -297,7 +366,7 @@ func TestHTTPHandlerGetByID(t *testing.T) {
 		request.SetPathValue("id", "999")
 		recorder := httptest.NewRecorder()
 
-		handler.GetByID(recorder, request)
+		serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.GetByID), recorder, request, 42)
 
 		if recorder.Code != http.StatusNotFound {
 			t.Fatalf("GetByID() status code = %d, want %d", recorder.Code, http.StatusNotFound)
@@ -321,7 +390,7 @@ func TestHTTPHandlerGetByID(t *testing.T) {
 			request.SetPathValue("id", "1")
 			recorder := httptest.NewRecorder()
 
-			handler.GetByID(recorder, request)
+			serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.GetByID), recorder, request, 42)
 
 			if recorder.Code != http.StatusServiceUnavailable {
 				t.Fatalf("GetByID() status code = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
@@ -341,6 +410,57 @@ func TestHTTPHandlerGetByID(t *testing.T) {
 	})
 }
 
+func TestHTTPHandlerGetByIDOwnership(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	created, err := service.Create(t.Context(), 42, "Owner A's task", "Private description")
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+	handler := NewHTTPHandler(service).Routes()
+	tests := []struct {
+		name       string
+		userID     int64
+		taskID     int64
+		wantStatus int
+	}{
+		{name: "owner A", userID: 42, taskID: created.ID, wantStatus: http.StatusOK},
+		{name: "other user B", userID: 43, taskID: created.ID, wantStatus: http.StatusNotFound},
+		{name: "missing task", userID: 43, taskID: created.ID + 1, wantStatus: http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/tasks/"+strconv.FormatInt(tt.taskID, 10), nil)
+			recorder := httptest.NewRecorder()
+
+			serveAuthenticatedTaskRequest(t, handler, recorder, request, tt.userID)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("GetByID() status = %d, want %d; body = %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
+			if tt.wantStatus == http.StatusOK {
+				var response taskResponse
+				if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+					t.Fatalf("Decode task response: %v", err)
+				}
+				if response.ID != created.ID || response.Title != created.Title || response.Description != created.Description {
+					t.Errorf("GetByID() task = %+v, want %+v", response, created)
+				}
+				return
+			}
+			var response map[string]any
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("Decode error response: %v", err)
+			}
+			if len(response) != 1 || response["error"] != ErrNotFound.Error() {
+				t.Errorf("Error response = %v, want only error=%q", response, ErrNotFound.Error())
+			}
+		})
+	}
+}
+
 func TestHTTPHandlerUpdateSuccess(t *testing.T) {
 	repository := NewMemoryRepository()
 	service := NewService(repository)
@@ -351,14 +471,14 @@ func TestHTTPHandlerUpdateSuccess(t *testing.T) {
 		"/tasks/1",
 		strings.NewReader(`{"title":"  Updated task  ","description":"  Updated description  ","status":"in_progress"}`),
 	)
-	created, err := service.Create(request.Context(), "Original task", "Original description")
+	created, err := service.Create(request.Context(), 42, "Original task", "Original description")
 	if err != nil {
 		t.Fatalf("Create task: %v", err)
 	}
 	request.SetPathValue("id", "1")
 	recorder := httptest.NewRecorder()
 
-	handler.Update(recorder, request)
+	serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.Update), recorder, request, 42)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("Update() status code = %d, want %d", recorder.Code, http.StatusOK)
@@ -390,7 +510,7 @@ func TestHTTPHandlerUpdateSuccess(t *testing.T) {
 		t.Errorf("Update() UpdatedAt = %v, want not before CreatedAt %v", response.UpdatedAt, response.CreatedAt)
 	}
 
-	stored, err := service.GetByID(request.Context(), created.ID)
+	stored, err := service.GetByID(request.Context(), 42, created.ID)
 	if err != nil {
 		t.Fatalf("GetByID() updated task: %v", err)
 	}
@@ -411,6 +531,96 @@ func TestHTTPHandlerUpdateSuccess(t *testing.T) {
 	}
 	if !stored.UpdatedAt.Equal(response.UpdatedAt) {
 		t.Errorf("GetByID() UpdatedAt = %v, want %v", stored.UpdatedAt, response.UpdatedAt)
+	}
+}
+
+func TestHTTPHandlerUpdateOwnership(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	created, err := service.Create(t.Context(), 42, "Original task", "Original description")
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+	handler := NewHTTPHandler(service).Routes()
+	path := "/tasks/" + strconv.FormatInt(created.ID, 10)
+	const body = `{"title":"Updated task","description":"Updated description","status":"done"}`
+	steps := []struct {
+		name       string
+		method     string
+		userID     int64
+		body       string
+		wantStatus int
+		wantTask   taskResponse
+	}{
+		{
+			name: "user B cannot update user A's task", method: http.MethodPut,
+			userID: 43, body: body, wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "user A reads unchanged task", method: http.MethodGet,
+			userID: 42, wantStatus: http.StatusOK, wantTask: newTaskResponse(created),
+		},
+		{
+			name: "user A can send the same update", method: http.MethodPut,
+			userID: 42, body: body, wantStatus: http.StatusOK,
+			wantTask: taskResponse{ID: created.ID, Title: "Updated task", Description: "Updated description", Status: StatusDone, CreatedAt: created.CreatedAt},
+		},
+	}
+	for _, step := range steps {
+		if !t.Run(step.name, func(t *testing.T) {
+			request := httptest.NewRequest(step.method, path, strings.NewReader(step.body))
+			recorder := httptest.NewRecorder()
+			serveAuthenticatedTaskRequest(t, handler, recorder, request, step.userID)
+
+			if recorder.Code != step.wantStatus {
+				t.Fatalf("Status = %d, want %d; body = %s", recorder.Code, step.wantStatus, recorder.Body.String())
+			}
+			if step.wantStatus == http.StatusNotFound {
+				var response map[string]any
+				if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+					t.Fatalf("Decode error response: %v", err)
+				}
+				if len(response) != 1 || response["error"] != ErrNotFound.Error() {
+					t.Errorf("Error response = %v, want only error=%q", response, ErrNotFound.Error())
+				}
+				return
+			}
+			var response taskResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("Decode task response: %v", err)
+			}
+			want := step.wantTask
+			if response.ID != want.ID || response.Title != want.Title || response.Description != want.Description || response.Status != want.Status || !response.CreatedAt.Equal(want.CreatedAt) {
+				t.Errorf("Task = %+v, want %+v", response, want)
+			}
+			if step.method == http.MethodGet && !response.UpdatedAt.Equal(created.UpdatedAt) {
+				t.Errorf("Foreign update changed UpdatedAt: got %v, want %v", response.UpdatedAt, created.UpdatedAt)
+			}
+		}) {
+			return
+		}
+	}
+}
+
+func TestHTTPHandlerUpdateUnauthorized(t *testing.T) {
+	handler := NewHTTPHandler(nil)
+	request := httptest.NewRequest(http.MethodPut, "/tasks/1", strings.NewReader(`{"title":"Updated","status":"done"}`))
+	request.SetPathValue("id", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.Update(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("Update() status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	if got := recorder.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+	}
+	var response errorResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("Decode error response: %v", err)
+	}
+	if response.Error != "unauthorized" {
+		t.Errorf("Error = %q, want unauthorized", response.Error)
 	}
 }
 
@@ -484,14 +694,14 @@ func TestHTTPHandlerUpdateErrors(t *testing.T) {
 				"/tasks/"+tt.id,
 				strings.NewReader(tt.body),
 			)
-			created, err := service.Create(request.Context(), "Original task", "Original description")
+			created, err := service.Create(request.Context(), 42, "Original task", "Original description")
 			if err != nil {
 				t.Fatalf("Create task: %v", err)
 			}
 			request.SetPathValue("id", tt.id)
 			recorder := httptest.NewRecorder()
 
-			handler.Update(recorder, request)
+			serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.Update), recorder, request, 42)
 
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("Update() status code = %d, want %d", recorder.Code, tt.wantStatus)
@@ -508,7 +718,7 @@ func TestHTTPHandlerUpdateErrors(t *testing.T) {
 				t.Errorf("Update() error = %q, want %q", response.Error, tt.wantError)
 			}
 
-			stored, err := service.GetByID(request.Context(), 1)
+			stored, err := service.GetByID(request.Context(), 42, 1)
 			if err != nil {
 				t.Fatalf("GetByID() original task: %v", err)
 			}
@@ -525,14 +735,14 @@ func TestHTTPHandlerDeleteSuccess(t *testing.T) {
 	handler := NewHTTPHandler(service)
 
 	request := httptest.NewRequest(http.MethodDelete, "/tasks/1", nil)
-	created, err := service.Create(request.Context(), "Task to delete", "Description")
+	created, err := service.Create(request.Context(), 42, "Task to delete", "Description")
 	if err != nil {
 		t.Fatalf("Create task: %v", err)
 	}
 	request.SetPathValue("id", "1")
 	recorder := httptest.NewRecorder()
 
-	handler.Delete(recorder, request)
+	serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.Delete), recorder, request, 42)
 
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("Delete() status code = %d, want %d", recorder.Code, http.StatusNoContent)
@@ -541,9 +751,88 @@ func TestHTTPHandlerDeleteSuccess(t *testing.T) {
 		t.Errorf("Delete() response body = %q, want empty", recorder.Body.String())
 	}
 
-	_, err = service.GetByID(request.Context(), created.ID)
+	_, err = service.GetByID(request.Context(), 42, created.ID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetByID() error = %v, want %v", err, ErrNotFound)
+	}
+}
+
+func TestHTTPHandlerDeleteOwnership(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	created, err := service.Create(t.Context(), 42, "User A's task", "Private description")
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+	handler := NewHTTPHandler(service).Routes()
+	path := "/tasks/" + strconv.FormatInt(created.ID, 10)
+	steps := []struct {
+		name       string
+		method     string
+		userID     int64
+		wantStatus int
+	}{
+		{name: "user B cannot delete user A's task", method: http.MethodDelete, userID: 43, wantStatus: http.StatusNotFound},
+		{name: "user A can still read the task", method: http.MethodGet, userID: 42, wantStatus: http.StatusOK},
+		{name: "user A deletes the task", method: http.MethodDelete, userID: 42, wantStatus: http.StatusNoContent},
+		{name: "user A cannot read the deleted task", method: http.MethodGet, userID: 42, wantStatus: http.StatusNotFound},
+	}
+	for _, step := range steps {
+		if !t.Run(step.name, func(t *testing.T) {
+			request := httptest.NewRequest(step.method, path, nil)
+			recorder := httptest.NewRecorder()
+			serveAuthenticatedTaskRequest(t, handler, recorder, request, step.userID)
+
+			if recorder.Code != step.wantStatus {
+				t.Fatalf("Status = %d, want %d; body = %s", recorder.Code, step.wantStatus, recorder.Body.String())
+			}
+			switch step.wantStatus {
+			case http.StatusNotFound:
+				var response map[string]any
+				if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+					t.Fatalf("Decode error response: %v", err)
+				}
+				if len(response) != 1 || response["error"] != ErrNotFound.Error() {
+					t.Errorf("Error response = %v, want only error=%q", response, ErrNotFound.Error())
+				}
+			case http.StatusOK:
+				var response taskResponse
+				if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+					t.Fatalf("Decode task response: %v", err)
+				}
+				if want := newTaskResponse(created); response != want {
+					t.Errorf("Task = %+v, want unchanged %+v", response, want)
+				}
+			case http.StatusNoContent:
+				if recorder.Body.Len() != 0 {
+					t.Errorf("Delete() response body = %q, want empty", recorder.Body.String())
+				}
+			}
+		}) {
+			return
+		}
+	}
+}
+
+func TestHTTPHandlerDeleteUnauthorized(t *testing.T) {
+	handler := NewHTTPHandler(nil)
+	request := httptest.NewRequest(http.MethodDelete, "/tasks/1", nil)
+	request.SetPathValue("id", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.Delete(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("Delete() status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	if got := recorder.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+	}
+	var response errorResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("Decode error response: %v", err)
+	}
+	if response.Error != "unauthorized" {
+		t.Errorf("Error = %q, want unauthorized", response.Error)
 	}
 }
 
@@ -580,7 +869,7 @@ func TestHTTPHandlerDeleteErrors(t *testing.T) {
 			service := NewService(repository)
 			handler := NewHTTPHandler(service)
 
-			created, err := service.Create(t.Context(), "Original task", "Original description")
+			created, err := service.Create(t.Context(), 42, "Original task", "Original description")
 			if err != nil {
 				t.Fatalf("Create task: %v", err)
 			}
@@ -588,7 +877,7 @@ func TestHTTPHandlerDeleteErrors(t *testing.T) {
 			request.SetPathValue("id", tt.id)
 			recorder := httptest.NewRecorder()
 
-			handler.Delete(recorder, request)
+			serveAuthenticatedTaskRequest(t, http.HandlerFunc(handler.Delete), recorder, request, 42)
 
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("Delete() status code = %d, want %d", recorder.Code, tt.wantStatus)
@@ -605,7 +894,7 @@ func TestHTTPHandlerDeleteErrors(t *testing.T) {
 				t.Errorf("Delete() error = %q, want %q", response.Error, tt.wantError)
 			}
 
-			stored, err := service.GetByID(request.Context(), 1)
+			stored, err := service.GetByID(request.Context(), 42, 1)
 			if err != nil {
 				t.Fatalf("GetByID() original task: %v", err)
 			}
@@ -691,7 +980,9 @@ func TestHTTPHandlerOperationErrors(t *testing.T) {
 						recorder.Code = 0
 						started := time.Now()
 
-						operation.handle(handler, recorder, request)
+						serveAuthenticatedTaskRequest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							operation.handle(handler, w, r)
+						}), recorder, request, 42)
 
 						if failure.canceled {
 							if recorder.Code != 0 || recorder.Body.Len() != 0 || len(recorder.Header()) != 0 {
@@ -788,7 +1079,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 			router := handler.Routes()
 
 			if tt.createTask {
-				if _, err := service.Create(t.Context(), "Original task", "Original description"); err != nil {
+				if _, err := service.Create(t.Context(), 42, "Original task", "Original description"); err != nil {
 					t.Fatalf("Create task: %v", err)
 				}
 			}
@@ -796,7 +1087,7 @@ func TestHTTPHandlerRoutes(t *testing.T) {
 			request := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			recorder := httptest.NewRecorder()
 
-			router.ServeHTTP(recorder, request)
+			serveAuthenticatedTaskRequest(t, router, recorder, request, 42)
 
 			if recorder.Code != tt.wantStatus {
 				t.Errorf("ServeHTTP() status code = %d, want %d", recorder.Code, tt.wantStatus)
@@ -810,7 +1101,7 @@ func TestHTTPHandlerListPagination(t *testing.T) {
 	repository := NewMemoryRepository()
 	createdIDs := make([]int64, 0, 25)
 	for i := 0; i < 25; i++ {
-		created, err := repository.Create(ctx, Task{Title: "Task", Status: StatusTodo})
+		created, err := repository.Create(ctx, Task{UserID: 42, Title: "Task", Status: StatusTodo})
 		if err != nil {
 			t.Fatalf("Create() task %d error = %v", i+1, err)
 		}
@@ -839,7 +1130,7 @@ func TestHTTPHandlerListPagination(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, tt.url, nil)
 			recorder := httptest.NewRecorder()
-			handler.Routes().ServeHTTP(recorder, request)
+			serveAuthenticatedTaskRequest(t, handler.Routes(), recorder, request, 42)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("List() status code = %d, want %d", recorder.Code, http.StatusOK)
@@ -872,10 +1163,10 @@ func TestHTTPHandlerListStatusFilter(t *testing.T) {
 	repository := NewMemoryRepository()
 	createdIDs := make([]int64, 0, 4)
 	for _, task := range []Task{
-		{Title: "A", Status: StatusTodo},
-		{Title: "B", Status: StatusDone},
-		{Title: "C", Status: StatusInProgress},
-		{Title: "D", Status: StatusDone},
+		{UserID: 42, Title: "A", Status: StatusTodo},
+		{UserID: 42, Title: "B", Status: StatusDone},
+		{UserID: 42, Title: "C", Status: StatusInProgress},
+		{UserID: 42, Title: "D", Status: StatusDone},
 	} {
 		created, err := repository.Create(ctx, task)
 		if err != nil {
@@ -971,7 +1262,7 @@ func TestHTTPHandlerListStatusFilter(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, tt.url, nil)
 			recorder := httptest.NewRecorder()
-			router.ServeHTTP(recorder, request)
+			serveAuthenticatedTaskRequest(t, router, recorder, request, 42)
 
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("List() status code = %d, want %d", recorder.Code, tt.wantStatus)
@@ -1030,7 +1321,7 @@ func TestHTTPHandlerListInvalidPagination(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, tt.url, nil)
 			recorder := httptest.NewRecorder()
-			handler.Routes().ServeHTTP(recorder, request)
+			serveAuthenticatedTaskRequest(t, handler.Routes(), recorder, request, 42)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("List() status code = %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -1045,6 +1336,109 @@ func TestHTTPHandlerListInvalidPagination(t *testing.T) {
 			}
 			if response.Error != tt.wantError {
 				t.Errorf("List() error = %q, want %q", response.Error, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestHTTPHandlerListUnauthorized(t *testing.T) {
+	for _, path := range []string{"/tasks", "/tasks?limit=bad", "/tasks?status=invalid"} {
+		t.Run(path, func(t *testing.T) {
+			handler := NewHTTPHandler(nil)
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			recorder := httptest.NewRecorder()
+
+			handler.List(recorder, request)
+
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("List() status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+			}
+			if got := recorder.Header().Get("WWW-Authenticate"); got != "Bearer" {
+				t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
+			var response errorResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("Decode response: %v", err)
+			}
+			if response.Error != "unauthorized" {
+				t.Errorf("Error = %q, want unauthorized", response.Error)
+			}
+		})
+	}
+}
+
+func TestHTTPHandlerListOwnership(t *testing.T) {
+	repository := NewMemoryRepository()
+	created := make([]Task, 0, 3)
+	for _, input := range []Task{
+		{UserID: 42, Title: "A1", Status: StatusDone},
+		{UserID: 43, Title: "B1", Status: StatusDone},
+		{UserID: 42, Title: "A2", Status: StatusDone},
+	} {
+		task, err := repository.Create(t.Context(), input)
+		if err != nil {
+			t.Fatalf("Create %s: %v", input.Title, err)
+		}
+		created = append(created, task)
+	}
+	handler := NewHTTPHandler(NewService(repository)).Routes()
+	tests := []struct {
+		name    string
+		userID  int64
+		path    string
+		wantIDs []int64
+	}{
+		{
+			name: "owner A without status", userID: 42, path: "/tasks",
+			wantIDs: []int64{created[0].ID, created[2].ID},
+		},
+		{
+			name: "owner A with status", userID: 42, path: "/tasks?status=done",
+			wantIDs: []int64{created[0].ID, created[2].ID},
+		},
+		{
+			name: "owner before pagination", userID: 42,
+			path:    "/tasks?status=done&order=asc&limit=1&offset=1",
+			wantIDs: []int64{created[2].ID},
+		},
+		{
+			name: "owner comes from JWT", userID: 42,
+			path:    "/tasks?user_id=43&status=done&order=asc&limit=1&offset=1",
+			wantIDs: []int64{created[2].ID},
+		},
+		{
+			name: "owner B", userID: 43, path: "/tasks?status=done",
+			wantIDs: []int64{created[1].ID},
+		},
+		{name: "owner without tasks", userID: 44, path: "/tasks"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			recorder := httptest.NewRecorder()
+
+			serveAuthenticatedTaskRequest(t, handler, recorder, request, tt.userID)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("List() status = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+			}
+			var response []taskResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("Decode response: %v", err)
+			}
+			if response == nil {
+				t.Fatal("List() returned null, want a JSON array")
+			}
+			if len(response) != len(tt.wantIDs) {
+				t.Fatalf("List() tasks = %+v, want IDs %v", response, tt.wantIDs)
+			}
+			for i, wantID := range tt.wantIDs {
+				if response[i].ID != wantID {
+					t.Errorf("List() task %d ID = %d, want %d", i, response[i].ID, wantID)
+				}
 			}
 		})
 	}

@@ -11,6 +11,7 @@ func TestMemoryRepositoryCRUD(t *testing.T) {
 	repository := NewMemoryRepository()
 
 	first, err := repository.Create(ctx, Task{
+		UserID:      42,
 		Title:       "First task",
 		Description: "First description",
 		Status:      StatusTodo,
@@ -29,6 +30,7 @@ func TestMemoryRepositoryCRUD(t *testing.T) {
 	}
 
 	second, err := repository.Create(ctx, Task{
+		UserID:      42,
 		Title:       "Second task",
 		Description: "Second description",
 		Status:      StatusTodo,
@@ -40,15 +42,18 @@ func TestMemoryRepositoryCRUD(t *testing.T) {
 		t.Errorf("Create() second task ID = %d, want 2", second.ID)
 	}
 
-	got, err := repository.GetByID(ctx, 1)
+	got, err := repository.GetByID(ctx, 42, 1)
 	if err != nil {
 		t.Fatalf("GetByID(1) error = %v", err)
 	}
 	if got.Title != first.Title {
 		t.Errorf("GetByID(1) Title = %q, want %q", got.Title, first.Title)
 	}
+	if foreign, err := repository.GetByID(ctx, 43, first.ID); !errors.Is(err, ErrNotFound) || foreign != (Task{}) {
+		t.Errorf("GetByID() for another user = (%+v, %v), want zero Task and ErrNotFound", foreign, err)
+	}
 
-	tasks, err := repository.List(ctx, ListOptions{Limit: 100})
+	tasks, err := repository.List(ctx, 42, ListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -59,14 +64,31 @@ func TestMemoryRepositoryCRUD(t *testing.T) {
 		t.Errorf("List() IDs = [%d, %d], want [1, 2]", tasks[0].ID, tasks[1].ID)
 	}
 
-	updated, err := repository.Update(ctx, Task{
+	input := Task{
 		ID:          first.ID,
+		UserID:      43,
 		Title:       "Updated task",
 		Description: "Updated description",
 		Status:      StatusInProgress,
-	})
+	}
+	if foreign, err := repository.Update(ctx, input); !errors.Is(err, ErrNotFound) || foreign != (Task{}) {
+		t.Fatalf("Update() for another user = (%+v, %v), want zero Task and ErrNotFound", foreign, err)
+	}
+	stored, err := repository.GetByID(ctx, first.UserID, first.ID)
+	if err != nil {
+		t.Fatalf("GetByID() after foreign update: %v", err)
+	}
+	if stored != first {
+		t.Fatalf("Foreign update changed task: got %+v, want %+v", stored, first)
+	}
+
+	input.UserID = first.UserID
+	updated, err := repository.Update(ctx, input)
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.UserID != first.UserID {
+		t.Errorf("Update() UserID = %d, want %d", updated.UserID, first.UserID)
 	}
 	if updated.Title != "Updated task" {
 		t.Errorf("Update() Title = %q, want %q", updated.Title, "Updated task")
@@ -84,13 +106,27 @@ func TestMemoryRepositoryCRUD(t *testing.T) {
 		t.Errorf("Update() UpdatedAt = %v, want not before CreatedAt = %v", updated.UpdatedAt, updated.CreatedAt)
 	}
 
-	if err := repository.Delete(ctx, first.ID); err != nil {
+	if err := repository.Delete(ctx, 43, first.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete() for another user error = %v, want ErrNotFound", err)
+	}
+	stored, err = repository.GetByID(ctx, first.UserID, first.ID)
+	if err != nil {
+		t.Fatalf("GetByID() after foreign delete: %v", err)
+	}
+	if stored != updated {
+		t.Fatalf("Foreign delete changed task: got %+v, want %+v", stored, updated)
+	}
+
+	if err := repository.Delete(ctx, first.UserID, first.ID); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 
-	_, err = repository.GetByID(ctx, first.ID)
+	_, err = repository.GetByID(ctx, 42, first.ID)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetByID() after Delete() error = %v, want ErrNotFound", err)
+	}
+	if err := repository.Delete(ctx, first.UserID, first.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete() deleted task error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -99,7 +135,7 @@ func TestMemoryRepositoryListPagination(t *testing.T) {
 	repository := NewMemoryRepository()
 	createdIDs := make([]int64, 0, 5)
 	for _, title := range []string{"First task", "Second task", "Third task", "Fourth task", "Fifth task"} {
-		created, err := repository.Create(ctx, Task{Title: title, Status: StatusTodo})
+		created, err := repository.Create(ctx, Task{UserID: 42, Title: title, Status: StatusTodo})
 		if err != nil {
 			t.Fatalf("Create() %q error = %v", title, err)
 		}
@@ -120,7 +156,7 @@ func TestMemoryRepositoryListPagination(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tasks, err := repository.List(ctx, tt.options)
+			tasks, err := repository.List(ctx, 42, tt.options)
 			if err != nil {
 				t.Fatalf("List() error = %v", err)
 			}
@@ -141,7 +177,7 @@ func TestMemoryRepositoryListPagination(t *testing.T) {
 
 func TestMemoryRepositoryListEmpty(t *testing.T) {
 	repository := NewMemoryRepository()
-	tasks, err := repository.List(context.Background(), ListOptions{Limit: 2})
+	tasks, err := repository.List(context.Background(), 42, ListOptions{Limit: 2})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -151,4 +187,8 @@ func TestMemoryRepositoryListEmpty(t *testing.T) {
 	if len(tasks) != 0 {
 		t.Fatalf("List() length = %d, want 0", len(tasks))
 	}
+}
+
+func TestMemoryRepositoryListOwnership(t *testing.T) {
+	testRepositoryListOwnership(t, NewMemoryRepository(), 42, 43)
 }

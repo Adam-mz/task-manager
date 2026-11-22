@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -9,7 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"task-manager/internal/auth"
 	"task-manager/internal/task"
+	"task-manager/internal/user"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,6 +59,18 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		)
 	})
 }
+func loadJWTSecret() ([]byte, error) {
+	value := os.Getenv("JWT_SECRET")
+	if value == "" {
+		return nil, errors.New("JWT_SECRET is not set")
+	}
+
+	secret, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("decode JWT_SECRET: %w", err)
+	}
+	return secret, nil
+}
 func loadDatabaseURL() (string, error) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -98,12 +113,30 @@ func main() {
 		return
 	}
 	defer pool.Close()
+	secret, err := loadJWTSecret()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	tokens, err := auth.NewTokenManager(secret, 15*time.Minute)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	fmt.Println("Подключение к PostgreSQL установлено")
 	repository := task.NewPostgresRepository(pool)
 	service := task.NewService(repository)
 	handler := task.NewHTTPHandler(service)
+
+	userRepository := user.NewPostgresRepository(pool)
+	userService := user.NewService(userRepository)
+	userHandler := user.NewHTTPHandler(userService, tokens)
+
 	mux := http.NewServeMux()
-	mux.Handle("/", handler.Routes())
+
+	mux.Handle("/", tokens.Middleware(handler.Routes()))
+	mux.Handle("/auth/", userHandler.Routes())
 
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
