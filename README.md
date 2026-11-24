@@ -75,6 +75,39 @@ docker compose logs --tail=20 api
 Контейнер `migrate` со статусом `Exited (0)` означает успешное
 завершение миграций.
 
+## Запуск на сервере
+
+Нужны Docker с поддержкой Linux-контейнеров и Docker Compose **2.24.4 или новее**.
+Создайте `.env.server` рядом с `compose.yaml` и задайте новые серверные секреты:
+
+```dotenv
+TASK_SERVER_DB_PASSWORD=<новый_случайный_пароль_в_hex>
+TASK_SERVER_JWT_SECRET=<новый_случайный_ключ_Base64>
+```
+
+Для пароля БД используйте 32 случайных байта в hex (64 символа): такой пароль
+подходит для URL подключения. JWT-ключ должен содержать не менее 32 случайных байт
+до кодирования в Base64. `.env.server` исключён из Git.
+
+Запустите API из корня проекта. Проект `task-manager-server` использует отдельный том PostgreSQL.
+
+```bash
+docker compose -p task-manager-server --env-file .env.server -f compose.yaml -f compose.server.yaml up -d --build api
+```
+
+После запуска проверьте готовность API. Ожидаемый ответ — `ready`.
+
+```bash
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+PostgreSQL доступен только внутри сети Compose. По умолчанию API доступен на
+`127.0.0.1:8080`. Для локальной репетиции можно добавить `TASK_SERVER_PORT=18080`
+в `.env.server` и использовать тот же порт в запросе к `/readyz`.
+
+Пароль применяется при создании нового тома PostgreSQL; в существующей базе
+его нужно менять отдельно, сохраняя данные.
+
 ## Остановка
 
 ```powershell

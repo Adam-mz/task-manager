@@ -1,0 +1,21 @@
+name: task-manager-server
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: "${TASK_SERVER_DB_PASSWORD:?Set TASK_SERVER_DB_PASSWORD in .env.server}"
+    ports: !reset []
+
+  migrate:
+    entrypoint: !override
+      - migrate
+      - -path=/migrations
+      - -database
+      - "postgres://task_manager:${TASK_SERVER_DB_PASSWORD:?Set TASK_SERVER_DB_PASSWORD in .env.server}@postgres:5432/task_manager?sslmode=disable"
+
+  api:
+    environment:
+      DATABASE_URL: "postgres://task_manager:${TASK_SERVER_DB_PASSWORD:?Set TASK_SERVER_DB_PASSWORD in .env.server}@postgres:5432/task_manager?sslmode=disable"
+      JWT_SECRET: "${TASK_SERVER_JWT_SECRET:?Set TASK_SERVER_JWT_SECRET in .env.server}"
+    ports: !override
+      - "127.0.0.1:${TASK_SERVER_PORT:-8080}:8080"
