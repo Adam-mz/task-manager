@@ -89,16 +89,21 @@ TASK_SERVER_JWT_SECRET=<новый_случайный_ключ_Base64>
 подходит для URL подключения. JWT-ключ должен содержать не менее 32 случайных байт
 до кодирования в Base64. `.env.server` исключён из Git.
 
-Запустите из корня проекта:
+Запустите API из корня проекта. Проект `task-manager-server` использует отдельный том PostgreSQL.
 
 ```bash
-docker compose --env-file .env.server -f compose.yaml -f compose.server.yaml up -d --build api
+docker compose -p task-manager-server --env-file .env.server -f compose.yaml -f compose.server.yaml up -d --build api
 ```
 
-PostgreSQL не публикует порт на хосте. `TASK_SERVER_PORT` можно опустить:
-по умолчанию API доступен на `127.0.0.1:8080`. Для локальной репетиции можно
-добавить `TASK_SERVER_PORT=18080` в `.env.server`.
-Проверка готовности: `curl --fail http://127.0.0.1:8080/readyz`, ожидаемый ответ — `ready`.
+После запуска проверьте готовность API. Ожидаемый ответ — `ready`.
+
+```bash
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+PostgreSQL доступен только внутри сети Compose. По умолчанию API доступен на
+`127.0.0.1:8080`. Для локальной репетиции можно добавить `TASK_SERVER_PORT=18080`
+в `.env.server` и использовать тот же порт в запросе к `/readyz`.
 
 Пароль применяется при создании нового тома PostgreSQL; в существующей базе
 его нужно менять отдельно, сохраняя данные.
